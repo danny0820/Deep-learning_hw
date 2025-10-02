@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse(open(''lab3_semi_supervised_flower_classification.py'', encoding=''utf-8'').read())\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

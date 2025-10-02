@@ -280,30 +280,230 @@ val_loader   = DataLoader(valid_set, shuffle=False, **loader_kwargs)
 from torch.nn.modules.conv import Conv2d
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
+
+# ═══════════════════════════════════════════════════════════════
+# ResNet18 完整實現（從零開始）
+# ═══════════════════════════════════════════════════════════════
+
+class BasicBlock(nn.Module):
+    """
+    ResNet 的基本殘差塊（Basic Block）
+    用於 ResNet18 和 ResNet34
+
+    結構：
+    x → Conv1 (3×3) → BN → ReLU → Conv2 (3×3) → BN → (+) → ReLU
+        ↓                                              ↑
+        └──────────────── shortcut ────────────────────┘
+    """
+    # expansion：輸出通道數相對於輸入通道數的倍數
+    # BasicBlock 不改變通道數，所以 expansion = 1
+    expansion = 1
+
+    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
+        """
+        參數:
+            in_channels: 輸入通道數
+            out_channels: 輸出通道數
+            stride: 卷積步長（用於降低空間尺寸）
+            downsample: shortcut 的下採樣層（當維度不匹配時使用）
+        """
+        super(BasicBlock, self).__init__()
+
+        # 第一個卷積層：3×3 卷積
+        # - stride 可以是 1 或 2
+        # - stride=2 時會將特徵圖尺寸減半
+        # - padding=1 保持特徵圖尺寸（在 stride=1 時）
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3,
+                               stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+
+        # 第二個卷積層：3×3 卷積
+        # - stride 固定為 1
+        # - 不改變特徵圖尺寸
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # Shortcut 連接
+        # 當輸入和輸出維度不同時，需要調整 shortcut
+        self.downsample = downsample
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        # 保存輸入，用於 shortcut 連接
+        identity = x
+
+        # 主路徑
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        # Shortcut 連接
+        # 如果需要下採樣（維度不匹配），則對 identity 進行調整
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        # 殘差連接：將主路徑和 shortcut 相加
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+
+class ResNet18(nn.Module):
+    """
+    ResNet18 完整實現
+
+    架構：
+    - Conv1: 7×7 卷積 + MaxPool
+    - Layer1: 2 個 BasicBlock，64 通道
+    - Layer2: 2 個 BasicBlock，128 通道
+    - Layer3: 2 個 BasicBlock，256 通道
+    - Layer4: 2 個 BasicBlock，512 通道
+    - AvgPool + FC
+    """
+    def __init__(self, num_classes=5):
+        super(ResNet18, self).__init__()
+
+        # ═══════════════════════════════════════════════
+        # 第一層：初始卷積層
+        # ═══════════════════════════════════════════════
+        # 7×7 卷積，stride=2，將圖片尺寸減半
+        # 輸入: [batch, 3, 224, 224]
+        # 輸出: [batch, 64, 112, 112]
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+
+        # 3×3 最大池化，stride=2，再次將尺寸減半
+        # 輸出: [batch, 64, 56, 56]
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        # ═══════════════════════════════════════════════
+        # ResNet 的四個階段（Layer1-4）
+        # ═══════════════════════════════════════════════
+        # Layer1: 2 個 BasicBlock，64 通道，不降低尺寸
+        # 輸出: [batch, 64, 56, 56]
+        self.layer1 = self._make_layer(64, 64, blocks=2, stride=1)
+
+        # Layer2: 2 個 BasicBlock，128 通道，尺寸減半
+        # 輸出: [batch, 128, 28, 28]
+        self.layer2 = self._make_layer(64, 128, blocks=2, stride=2)
+
+        # Layer3: 2 個 BasicBlock，256 通道，尺寸減半
+        # 輸出: [batch, 256, 14, 14]
+        self.layer3 = self._make_layer(128, 256, blocks=2, stride=2)
+
+        # Layer4: 2 個 BasicBlock，512 通道，尺寸減半
+        # 輸出: [batch, 512, 7, 7]
+        self.layer4 = self._make_layer(256, 512, blocks=2, stride=2)
+
+        # ═══════════════════════════════════════════════
+        # 全局平均池化和分類器
+        # ═══════════════════════════════════════════════
+        # 自適應平均池化，輸出固定為 1×1
+        # 輸出: [batch, 512, 1, 1]
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # 分類器
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+
+        # ═══════════════════════════════════════════════
+        # 權重初始化
+        # ═══════════════════════════════════════════════
+        self._initialize_weights()
+
+    def _make_layer(self, in_channels, out_channels, blocks, stride):
+        """
+        創建一個 ResNet 層（包含多個 BasicBlock）
+
+        參數:
+            in_channels: 輸入通道數
+            out_channels: 輸出通道數
+            blocks: BasicBlock 的數量
+            stride: 第一個 block 的步長（用於降低空間尺寸）
+        """
+        downsample = None
+
+        # 如果步長不為 1 或通道數改變，需要對 shortcut 進行下採樣
+        if stride != 1 or in_channels != out_channels:
+            downsample = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1,
+                         stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+
+        layers = []
+
+        # 第一個 block（可能會降低空間尺寸）
+        layers.append(BasicBlock(in_channels, out_channels, stride, downsample))
+
+        # 剩餘的 blocks（不改變尺寸）
+        for _ in range(1, blocks):
+            layers.append(BasicBlock(out_channels, out_channels))
+
+        return nn.Sequential(*layers)
+
+    def _initialize_weights(self):
+        """
+        使用 Kaiming 初始化（He 初始化）
+        專門針對 ReLU 激活函數設計
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                # 對卷積層使用 Kaiming 正態分布初始化
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                # BatchNorm 的權重初始化為 1，偏置初始化為 0
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                # 全連接層使用正態分布初始化
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        # 初始卷積層
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        # 四個 ResNet 階段
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        # 全局平均池化
+        x = self.avgpool(x)
+
+        # 分類器
+        x = self.fc(x)
+
+        return x
+
+
+# 使用自定義的 ResNet18
 class YourCNNModel(nn.Module):
     def __init__(self, num_classes=5):
         super().__init__()
         ########################################################################
         #     TODO: use nn.xxx method to generate a CNN model part             #
         ########################################################################
-        # 使用 ResNet50 作為骨幹（從頭訓練，不使用預訓練權重）
-        # ResNet50 比 ResNet18 更深，效果更好，且比 EfficientNet 更容易訓練
-        resnet = resnet50(weights=None)  # weights=None 表示從頭訓練
-
-        # 移除最後的全連接層
-        self.features = nn.Sequential(*list(resnet.children())[:-1])
-
-        # 添加自定義的分類器
-        # ResNet50 的特徵維度是 2048
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(0.5),
-            nn.Linear(2048, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, num_classes)
-        )
+        # 使用自己實現的 ResNet18
+        self.model = ResNet18(num_classes=num_classes)
         ########################################################################
         #                           End of your code                           #
         ########################################################################
@@ -314,8 +514,7 @@ class YourCNNModel(nn.Module):
         ########################################################################
         #     TODO: forward your model and get output                          #
         ########################################################################
-        x = self.features(x)  # 特徵提取
-        out = self.classifier(x)  # 分類
+        out = self.model(x)
         ########################################################################
         #                           End of your code                           #
         ########################################################################
@@ -494,6 +693,12 @@ def val(input_data, model, criterion, epoch=None, total_epochs=None):
 max_epochs = 30
 log_interval = 10
 
+# 學習率調度器：CosineAnnealingLR
+# - T_max：學習率從初始值降到最小值所需的 epoch 數（設為總 epoch 數）
+# - eta_min：學習率的最小值，默認為 0
+# - 使用餘弦退火策略，學習率會平滑地從初始值降到最小值
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=0)
+
 train_acc_list = []
 train_loss_list = []
 val_acc_list = []
@@ -507,6 +712,9 @@ for epoch in range(1, max_epochs + 1):
     train_loss_list.append(train_loss)
     val_acc_list.append(val_acc)
     val_loss_list.append(val_loss)
+
+    # 更新學習率
+    scheduler.step()
 
     if epoch % log_interval == 0:
         lr = optimizer.param_groups[0]['lr']
@@ -669,6 +877,11 @@ log_interval = 10  # Log every N epochs like supervised training
 best_acc = 0.0
 SELF_TRAIN_CKPT = 'self_training.pt'
 
+# 學習率調度器：CosineAnnealingLR (用於自我訓練階段)
+# - T_max：設為自我訓練的總 epoch 數
+# - eta_min：最小學習率設為初始學習率的 1/10
+scheduler_ssl = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=5e-5)
+
 # Initialize with original labeled data
 current_train_dataset = train_set
 train_loader_ssl = train_loader  # Initialize with original train loader
@@ -703,6 +916,9 @@ for epoch in range(n_epochs):
 
         # ---------- Validation ----------
         valid_acc, valid_loss = val(val_loader, model, criterion, epoch=epoch+1, total_epochs=n_epochs)
+
+        # 更新學習率
+        scheduler_ssl.step()
 
         # Log every log_interval epochs like supervised training
         if (epoch + 1) % log_interval == 0:

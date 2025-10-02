@@ -4,11 +4,12 @@
 1. [資料擴增 (Data Augmentation)](#1-資料擴增-data-augmentation)
 2. [CNN 模型架構](#2-cnn-模型架構)
 3. [損失函數與優化器 - 第一階段](#3-損失函數與優化器---第一階段監督式學習)
-4. [訓練函數](#4-訓練函數)
-5. [驗證函數](#5-驗證函數)
-6. [偽標籤生成](#6-偽標籤生成)
-7. [損失函數與優化器 - 第二階段](#7-損失函數與優化器---第二階段自我訓練)
-8. [自我訓練迴圈](#8-自我訓練迴圈)
+4. [學習率調度器](#4-學習率調度器)
+5. [訓練函數](#5-訓練函數)
+6. [驗證函數](#6-驗證函數)
+7. [偽標籤生成](#7-偽標籤生成)
+8. [損失函數與優化器 - 第二階段](#8-損失函數與優化器---第二階段自我訓練)
+9. [自我訓練迴圈](#9-自我訓練迴圈)
 
 ---
 
@@ -22,17 +23,111 @@
 
 ### 1.2 訓練集資料擴增 (transforms_train)
 
+#### 完整代碼與逐行解說
+
 ```python
+# 從 torchvision.transforms.v2 導入 transforms 模組
+# v2 是新版 API，提供更強大和一致的轉換功能
+from torchvision.transforms import v2 as transforms
+
+# 使用 Compose 將多個轉換操作串聯起來
+# Compose 會按照列表順序依次執行每個轉換
 transforms_train = transforms.Compose([
+    # 1️⃣ Resize：將圖片調整為 256×256
+    # - 輸入：任意尺寸的圖片
+    # - 輸出：256×256 的圖片
+    # - 目的：統一所有圖片的基礎尺寸
     transforms.Resize((256, 256)),
+
+    # 2️⃣ RandomResizedCrop：隨機裁切並縮放到 224×224
+    # - scale=(0.8, 1.0)：隨機選取原圖 80%-100% 的區域
+    # - 輸出：224×224 的圖片
+    # - 目的：
+    #   a) 模擬不同拍攝距離（遠近）
+    #   b) 強制模型學習局部特徵，不依賴完整圖片
+    #   c) 224×224 是許多 CNN 架構的標準輸入尺寸
     transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+
+    # 3️⃣ RandomHorizontalFlip：以 50% 機率水平翻轉圖片
+    # - p=0.5：每張圖片有 50% 機率被翻轉
+    # - 目的：
+    #   a) 花朵通常左右對稱，翻轉不改變類別
+    #   b) 有效增加一倍的訓練資料量
+    #   c) 提升模型對方向的不變性
     transforms.RandomHorizontalFlip(p=0.5),
+
+    # 4️⃣ RandomRotation：隨機旋轉 ±15 度
+    # - 15：旋轉角度範圍為 [-15°, +15°]
+    # - 目的：
+    #   a) 模擬不同拍攝角度
+    #   b) 現實中花朵可能以任意角度出現
+    #   c) 提升模型對旋轉的容錯能力
+    # - 注意：角度不能太大，否則可能失真或超出圖片邊界
     transforms.RandomRotation(15),
+
+    # 5️⃣ ColorJitter：隨機調整顏色屬性
+    # - brightness=0.2：亮度在 [0.8, 1.2] 範圍內隨機調整
+    # - contrast=0.2：對比度在 [0.8, 1.2] 範圍內隨機調整
+    # - saturation=0.2：飽和度在 [0.8, 1.2] 範圍內隨機調整
+    # - hue=0.1：色調在 [-0.1, +0.1] 範圍內隨機調整
+    # - 目的：
+    #   a) 模擬不同光照條件（陰天、晴天、室內、室外）
+    #   b) 模擬不同相機設定
+    #   c) 減少模型對特定顏色的依賴
+    #   d) 提升模型在各種環境下的穩健性
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+
+    # 6️⃣ ToImage：將 PIL Image 或 numpy array 轉換為 PyTorch Tensor
+    # - torchvision.transforms.v2 的新 API
+    # - 取代舊的 ToTensor()
+    # - 輸出：Tensor 格式的圖片，shape 為 [C, H, W]
     transforms.ToImage(),
+
+    # 7️⃣ ToDtype：轉換資料型態並縮放數值
+    # - torch.float32：將資料轉為 32 位元浮點數
+    # - scale=True：將 [0, 255] 的整數值縮放到 [0.0, 1.0] 的浮點數
+    # - 目的：
+    #   a) 神經網路通常使用浮點數運算
+    #   b) [0, 1] 範圍的數值更適合訓練（數值穩定）
     transforms.ToDtype(torch.float32, scale=True),
+
+    # 8️⃣ Normalize：標準化（Z-score normalization）
+    # - mean=[0.485, 0.456, 0.406]：RGB 三個通道的平均值
+    # - std=[0.229, 0.224, 0.225]：RGB 三個通道的標準差
+    # - 這些值來自 ImageNet 資料集的統計
+    # - 計算公式：output = (input - mean) / std
+    # - 目的：
+    #   a) 將數值分布標準化為均值 0、標準差 1
+    #   b) 加速訓練收斂
+    #   c) 減少內部協變量偏移（Internal Covariate Shift）
+    #   d) 使用 ImageNet 統計值是遷移學習的常見做法
+    # - 範例計算：
+    #   輸入 R 通道值 = 0.8
+    #   輸出 = (0.8 - 0.485) / 0.229 = 1.376
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
+```
+
+#### 轉換流程視覺化
+
+```
+原始圖片 (任意尺寸，如 800×600)
+   ↓ Resize
+256×256 圖片
+   ↓ RandomResizedCrop (隨機裁取 80%-100% 區域)
+224×224 圖片
+   ↓ RandomHorizontalFlip (50% 機率翻轉)
+224×224 圖片（可能已翻轉）
+   ↓ RandomRotation (±15°)
+224×224 圖片（可能已旋轉）
+   ↓ ColorJitter (調整亮度、對比、飽和度、色調)
+224×224 圖片（顏色已調整）
+   ↓ ToImage
+Tensor [3, 224, 224]，值範圍 [0, 255]
+   ↓ ToDtype (scale=True)
+Tensor [3, 224, 224]，值範圍 [0.0, 1.0]，dtype=float32
+   ↓ Normalize (使用 ImageNet 統計值)
+Tensor [3, 224, 224]，值範圍約 [-2, 2]，均值≈0，標準差≈1
 ```
 
 #### 各項轉換說明：
@@ -50,14 +145,62 @@ transforms_train = transforms.Compose([
 
 ### 1.3 驗證/測試集資料轉換 (transforms_test)
 
+#### 完整代碼與逐行解說
+
 ```python
+# 驗證/測試集使用較簡單的轉換
+# 目標：保持一致性，不引入隨機性
 transforms_test = transforms.Compose([
+    # 1️⃣ Resize：將圖片調整為 256×256
+    # - 與訓練集相同的第一步
+    # - 確保所有圖片有統一的基礎尺寸
     transforms.Resize((256, 256)),
+
+    # 2️⃣ CenterCrop：從中心裁切 224×224
+    # - ⚠️ 與訓練集的 RandomResizedCrop 不同
+    # - 總是從圖片中心裁切，確保每次結果一致
+    # - 不使用隨機裁切，因為測試時需要可重複的結果
+    # - 目的：
+    #   a) 獲得圖片的中心區域（通常包含主要內容）
+    #   b) 確保同一張圖片每次處理結果相同
+    #   c) 與訓練集保持相同的輸出尺寸 224×224
     transforms.CenterCrop(224),
+
+    # 3️⃣ ToImage：轉換為 PyTorch Tensor
+    # - 與訓練集相同
+    # - 將 PIL Image 轉為 Tensor，shape 為 [C, H, W]
     transforms.ToImage(),
+
+    # 4️⃣ ToDtype：轉換資料型態並縮放
+    # - 與訓練集相同
+    # - 將 [0, 255] 縮放到 [0.0, 1.0]
+    # - dtype=torch.float32
     transforms.ToDtype(torch.float32, scale=True),
+
+    # 5️⃣ Normalize：標準化
+    # - 與訓練集使用完全相同的參數
+    # - ⚠️ 非常重要：必須使用與訓練時相同的統計值
+    # - 如果使用不同的 mean/std，模型性能會嚴重下降
+    # - mean=[0.485, 0.456, 0.406]：ImageNet 的 RGB 平均值
+    # - std=[0.229, 0.224, 0.225]：ImageNet 的 RGB 標準差
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
+```
+
+#### 轉換流程視覺化
+
+```
+原始測試圖片 (任意尺寸，如 640×480)
+   ↓ Resize
+256×256 圖片
+   ↓ CenterCrop（從中心裁切，無隨機性）
+224×224 圖片
+   ↓ ToImage
+Tensor [3, 224, 224]，值範圍 [0, 255]
+   ↓ ToDtype (scale=True)
+Tensor [3, 224, 224]，值範圍 [0.0, 1.0]，dtype=float32
+   ↓ Normalize（與訓練集使用相同參數）
+Tensor [3, 224, 224]，值範圍約 [-2, 2]，均值≈0，標準差≈1
 ```
 
 #### 與訓練集的差異：
@@ -77,106 +220,288 @@ transforms_test = transforms.Compose([
 
 ### 2.1 整體架構設計
 
+我們使用 **ResNet50** 作為骨幹網路，並添加自定義分類器。ResNet50 是一個非常強大的卷積神經網路架構，具有 50 層深度。
+
+#### 完整代碼與逐行解說
+
 ```python
+# 導入必要的模組
+from torchvision.models import resnet50
+import torch.nn as nn
+
 class YourCNNModel(nn.Module):
+    """
+    花朵分類模型
+    - 骨幹網路：ResNet50（從頭訓練，不使用預訓練權重）
+    - 分類器：自定義全連接層
+    """
     def __init__(self, num_classes=5):
+        # 調用父類的初始化方法
+        # nn.Module 是所有神經網路模組的基類
         super().__init__()
-        # 卷積層
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(256)
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(512)
-        
-        self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.5)
-        
-        # 全連接層
-        self.fc1 = nn.Linear(512 * 14 * 14, 1024)
-        self.fc2 = nn.Linear(1024, 512)
-        self.fc3 = nn.Linear(512, num_classes)
+
+        # ═══════════════════════════════════════════════════════
+        # 第一部分：特徵提取器（Feature Extractor）
+        # ═══════════════════════════════════════════════════════
+
+        # 1️⃣ 創建 ResNet50 模型（不使用預訓練權重）
+        # - weights=None：從頭開始訓練，不載入 ImageNet 預訓練權重
+        # - 為什麼不用預訓練權重？
+        #   a) 作業要求不能使用預訓練模型
+        #   b) 從頭訓練可以完全適應我們的花朵資料集
+        # - ResNet50 架構：
+        #   輸入 [3, 224, 224]
+        #   → Conv1 + MaxPool
+        #   → Layer1 (3個 Bottleneck blocks)
+        #   → Layer2 (4個 Bottleneck blocks)
+        #   → Layer3 (6個 Bottleneck blocks)
+        #   → Layer4 (3個 Bottleneck blocks)
+        #   → AvgPool
+        #   → Fully Connected (原始的分類層)
+        resnet = resnet50(weights=None)
+
+        # 2️⃣ 移除 ResNet50 的最後一層（全連接分類層）
+        # - resnet.children()：獲取 ResNet50 的所有子模組
+        # - [:-1]：取除了最後一個模組之外的所有模組
+        # - 最後一個模組是 Linear(2048, 1000)，用於 ImageNet 的 1000 類分類
+        # - 我們只需要 5 類分類，所以要替換這一層
+        # - *list(...)：解包列表，將所有模組作為參數傳給 Sequential
+        # - nn.Sequential：將多個模組串聯成一個模組
+        # - 結果：self.features 包含 ResNet50 的所有層，除了最後的分類層
+        #   輸出維度：[batch_size, 2048, 1, 1]
+        self.features = nn.Sequential(*list(resnet.children())[:-1])
+
+        # ═══════════════════════════════════════════════════════
+        # 第二部分：分類器（Classifier）
+        # ═══════════════════════════════════════════════════════
+
+        # 3️⃣ 自定義分類器
+        # 輸入：ResNet50 特徵提取器的輸出 [batch_size, 2048, 1, 1]
+        # 輸出：5 個類別的預測分數 [batch_size, 5]
+        self.classifier = nn.Sequential(
+            # 第 1 層：Flatten - 展平多維 Tensor
+            # - 輸入：[batch_size, 2048, 1, 1]
+            # - 輸出：[batch_size, 2048]
+            # - 目的：將 4D tensor 轉為 2D，以便輸入全連接層
+            nn.Flatten(),
+
+            # 第 2 層：Dropout - 防止過擬合
+            # - p=0.5：訓練時隨機丟棄 50% 的神經元
+            # - 測試時不丟棄（自動切換）
+            # - 目的：
+            #   a) 防止模型過度依賴某些特定神經元
+            #   b) 強制網路學習更穩健的特徵表示
+            #   c) 提升泛化能力
+            nn.Dropout(0.5),
+
+            # 第 3 層：Linear - 第一個全連接層
+            # - 輸入：2048 維特徵向量
+            # - 輸出：512 維特徵向量
+            # - 參數量：2048 × 512 + 512 = 1,049,088 個參數
+            # - 目的：降維並學習高層特徵組合
+            nn.Linear(2048, 512),
+
+            # 第 4 層：ReLU - 激活函數
+            # - ReLU(x) = max(0, x)
+            # - 引入非線性，使網路能學習複雜模式
+            # - 相比 Sigmoid/Tanh：
+            #   a) 計算更快（簡單的 max 運算）
+            #   b) 緩解梯度消失問題
+            #   c) 使網路更容易訓練
+            nn.ReLU(),
+
+            # 第 5 層：Dropout - 第二次防止過擬合
+            # - p=0.3：較低的丟棄率（30%）
+            # - 為何使用較低比率？
+            #   a) 512 維特徵已經比 2048 少很多
+            #   b) 避免過度正則化，保留足夠信息
+            nn.Dropout(0.3),
+
+            # 第 6 層：Linear - 輸出層
+            # - 輸入：512 維特徵向量
+            # - 輸出：5 維向量（對應 5 個花朵類別）
+            # - 參數量：512 × 5 + 5 = 2,565 個參數
+            # - ⚠️ 不需要 Softmax！
+            #   CrossEntropyLoss 內部會自動處理
+            #   輸出的是 logits（原始預測分數）
+            nn.Linear(512, num_classes)
+        )
 ```
 
-### 2.2 架構設計理念
+### 2.2 前向傳播（Forward Pass）
 
-#### 卷積層設計（4 個區塊）
-
-```
-輸入 (3, 224, 224)
-    ↓ Conv1 (3→64) + BN + ReLU + MaxPool
-(64, 112, 112)
-    ↓ Conv2 (64→128) + BN + ReLU + MaxPool
-(128, 56, 56)
-    ↓ Conv3 (128→256) + BN + ReLU + MaxPool
-(256, 28, 28)
-    ↓ Conv4 (256→512) + BN + ReLU + MaxPool
-(512, 14, 14)
-    ↓ Flatten
-98304 (512×14×14)
-    ↓ FC1 + ReLU + Dropout
-1024
-    ↓ FC2 + ReLU + Dropout
-512
-    ↓ FC3 (輸出層)
-5 (類別數)
-```
-
-#### 各層組件說明：
-
-| 組件 | 功能 | 為何使用 |
-|------|------|----------|
-| **Conv2d** | 卷積層，提取特徵 | 自動學習圖片的空間特徵（邊緣、紋理、形狀） |
-| **kernel_size=3, padding=1** | 3×3 卷積核，邊緣填充 1 | 保持特徵圖尺寸不變，3×3 是標準選擇（效能與效果平衡） |
-| **BatchNorm2d** | 批次正規化 | 1. 加速訓練收斂<br>2. 減少內部協變量偏移<br>3. 允許使用較高學習率<br>4. 具有輕微正則化效果 |
-| **ReLU** | 激活函數 | 引入非線性，使網路能學習複雜模式 |
-| **MaxPool2d(2, 2)** | 最大池化，2×2 視窗 | 1. 降低特徵圖尺寸（減少參數量）<br>2. 增加感受野<br>3. 提供平移不變性 |
-| **Dropout(0.5)** | 隨機丟棄 50% 神經元 | 防止過擬合，迫使網路學習更穩健的特徵 |
-
-#### 通道數漸進式增加的原因：
-
-- **3 → 64 → 128 → 256 → 512**
-  - 早期層：低層特徵（邊緣、顏色），需要較少通道
-  - 深層：高層特徵（複雜形狀、語義），需要更多通道來表達
-  - 符合 CNN 的層次化特徵提取原理
-
-### 2.3 前向傳播流程
+#### 完整代碼與逐行解說
 
 ```python
 def forward(self, x):
-    # 卷積區塊 1
-    x = self.pool(F.relu(self.bn1(self.conv1(x))))
-    # 卷積區塊 2
-    x = self.pool(F.relu(self.bn2(self.conv2(x))))
-    # 卷積區塊 3
-    x = self.pool(F.relu(self.bn3(self.conv3(x))))
-    # 卷積區塊 4
-    x = self.pool(F.relu(self.bn4(self.conv4(x))))
-    
-    # 展平
-    x = x.view(x.size(0), -1)
-    
-    # 全連接層
-    x = F.relu(self.fc1(x))
-    x = self.dropout(x)
-    x = F.relu(self.fc2(x))
-    x = self.dropout(x)
-    out = self.fc3(x)
+    """
+    前向傳播函數
+
+    參數:
+        x: 輸入圖片 Tensor
+           - shape: [batch_size, 3, 224, 224]
+           - dtype: torch.float32
+           - 值範圍: 標準化後約 [-2, 2]
+
+    返回:
+        out: 預測的 logits（原始分數）
+           - shape: [batch_size, 5]
+           - dtype: torch.float32
+           - 值範圍: 任意實數（未經 Softmax）
+    """
+
+    # ════════════════════════════════════════════════
+    # 輸入驗證（僅在開發階段使用，確保輸入正確）
+    # ════════════════════════════════════════════════
+
+    # 檢查 1：確保輸入是 PyTorch Tensor
+    # - 如果傳入 numpy array 或其他類型，會拋出錯誤
+    # - 目的：盡早發現錯誤，避免在深層網路中才出錯
+    assert isinstance(x, torch.Tensor), "Input should be a torch Tensor"
+
+    # 檢查 2：確保輸入是 4 維 Tensor
+    # - 正確格式：[batch_size, channels, height, width]
+    # - 錯誤格式示例：
+    #   * [3, 224, 224]（缺少 batch 維度）
+    #   * [batch_size, 224, 224, 3]（通道在最後，NHWC 格式）
+    # - 目的：確保輸入符合 PyTorch 的 NCHW 格式
+    assert x.dim() == 4, "Input should be NCHW format"
+
+    # ════════════════════════════════════════════════
+    # 實際的前向傳播
+    # ════════════════════════════════════════════════
+
+    # 步驟 1：特徵提取
+    # - 輸入：x，shape = [batch_size, 3, 224, 224]
+    # - 經過 ResNet50 的所有卷積層和池化層
+    # - 輸出：x，shape = [batch_size, 2048, 1, 1]
+    # - 這個 2048 維向量包含了圖片的高層語義特徵
+    # - 1×1 的空間維度是由 Global Average Pooling 產生的
+    x = self.features(x)
+
+    # 步驟 2：分類
+    # - 輸入：x，shape = [batch_size, 2048, 1, 1]
+    # - 經過自定義分類器：
+    #   1. Flatten: [batch_size, 2048, 1, 1] → [batch_size, 2048]
+    #   2. Dropout(0.5): 訓練時隨機丟棄 50% 神經元
+    #   3. Linear(2048→512): [batch_size, 2048] → [batch_size, 512]
+    #   4. ReLU: 激活函數
+    #   5. Dropout(0.3): 訓練時隨機丟棄 30% 神經元
+    #   6. Linear(512→5): [batch_size, 512] → [batch_size, 5]
+    # - 輸出：out，shape = [batch_size, 5]
+    # - 5 個數值分別對應 5 個類別的預測分數（logits）
+    out = self.classifier(x)
+
+    # 返回預測結果
+    # ⚠️ 注意：這裡返回的是 logits，不是機率
+    # - Logits 可以是任意實數（可正可負）
+    # - CrossEntropyLoss 會自動處理 Softmax 轉換
+    # - 範例輸出：[2.3, -1.2, 0.5, 1.8, -0.3]
     return out
 ```
 
-#### 操作順序的重要性：
+### 2.3 模型初始化與設備配置
 
-1. **Conv → BN → ReLU → Pool**：這是標準順序
-   - BatchNorm 在激活前正規化
-   - ReLU 提供非線性
-   - Pool 降維
+#### 完整代碼與逐行解說
 
-2. **為何不在輸出層使用 Softmax？**
-   - CrossEntropyLoss 內部已包含 LogSoftmax
-   - 直接輸出 logits 更高效且數值更穩定
+```python
+# 1️⃣ 設定運算設備
+# - 檢查是否有可用的 CUDA GPU
+# - 如果有 GPU，使用 GPU 進行運算（速度快 10-100 倍）
+# - 如果沒有 GPU，使用 CPU 進行運算
+device = torch.device('cuda')
+# 如果想強制使用 CPU，可以改為：
+# device = torch.device('cpu')
+
+# 2️⃣ 創建模型實例
+# - num_classes=num_classes：花朵類別數（5）
+# - CLASS_NAMES = ['daisy', 'dandelion', 'rose', 'sunflower', 'tulip']
+# - 此時模型的所有參數都是隨機初始化的
+# - 參數初始化通常使用 Kaiming 初始化（針對 ReLU 優化）
+model = YourCNNModel(num_classes=num_classes)
+
+# 3️⃣ 將模型移動到指定設備（GPU 或 CPU）
+# - .to(device)：將模型的所有參數和緩衝區移動到指定設備
+# - 如果 device 是 'cuda'，所有參數會被複製到 GPU 記憶體
+# - 這一步必須在訓練前完成
+# - ⚠️ 之後所有輸入數據也必須移動到相同設備
+model = model.to(device)
+```
+
+### 2.4 ResNet50 架構詳解
+
+#### ResNet50 完整結構
+
+```
+輸入圖片 [batch_size, 3, 224, 224]
+   ↓
+┌─────────────────────────────────────┐
+│ Conv1: 7×7 卷積, stride=2, 64 通道  │
+│ BatchNorm + ReLU                    │
+│ MaxPool 3×3, stride=2               │
+│ 輸出: [batch_size, 64, 56, 56]     │
+└─────────────────────────────────────┘
+   ↓
+┌─────────────────────────────────────┐
+│ Layer1: 3 個 Bottleneck blocks      │
+│ 通道: 64 → 256                      │
+│ 輸出: [batch_size, 256, 56, 56]    │
+└─────────────────────────────────────┘
+   ↓
+┌─────────────────────────────────────┐
+│ Layer2: 4 個 Bottleneck blocks      │
+│ 通道: 256 → 512, stride=2          │
+│ 輸出: [batch_size, 512, 28, 28]    │
+└─────────────────────────────────────┘
+   ↓
+┌─────────────────────────────────────┐
+│ Layer3: 6 個 Bottleneck blocks      │
+│ 通道: 512 → 1024, stride=2         │
+│ 輸出: [batch_size, 1024, 14, 14]   │
+└─────────────────────────────────────┘
+   ↓
+┌─────────────────────────────────────┐
+│ Layer4: 3 個 Bottleneck blocks      │
+│ 通道: 1024 → 2048, stride=2        │
+│ 輸出: [batch_size, 2048, 7, 7]     │
+└─────────────────────────────────────┘
+   ↓
+┌─────────────────────────────────────┐
+│ AdaptiveAvgPool2d(1, 1)             │
+│ 全局平均池化                         │
+│ 輸出: [batch_size, 2048, 1, 1]     │
+└─────────────────────────────────────┘
+   ↓
+┌─────────────────────────────────────┐
+│ 自定義分類器                         │
+│ Flatten → Dropout → Linear → ReLU  │
+│ → Dropout → Linear                  │
+│ 輸出: [batch_size, 5]               │
+└─────────────────────────────────────┘
+```
+
+#### Bottleneck Block 結構
+
+每個 Bottleneck block 包含：
+1. **1×1 卷積**：降維（減少通道數）
+2. **3×3 卷積**：特徵提取
+3. **1×1 卷積**：升維（恢復通道數）
+4. **Shortcut 連接**：殘差連接，解決梯度消失問題
+
+### 2.5 模型參數統計
+
+| 組件 | 參數量 | 佔比 |
+|------|--------|------|
+| **ResNet50 骨幹** | 約 23.5M | 95.6% |
+| **自定義分類器** | 約 1.05M | 4.4% |
+| **總計** | **約 24.55M** | **100%** |
+
+**訓練時記憶體需求**（batch_size=128）：
+- 模型參數：約 95 MB
+- 梯度：約 95 MB
+- 中間激活值：約 500-800 MB
+- **總計**：約 1.2-1.5 GB GPU 記憶體
+
 
 ---
 
@@ -226,9 +551,193 @@ optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
 
 ---
 
-## 4. 訓練函數
+## 4. 學習率調度器
 
-### 4.1 完整實作
+### 4.1 什麼是學習率調度器（Learning Rate Scheduler）？
+
+學習率調度器是一種在訓練過程中**動態調整學習率**的技術，幫助模型更好地收斂。
+
+**為何需要調整學習率？**
+- **訓練初期**：使用較大學習率快速逼近最優解
+- **訓練後期**：使用較小學習率精細調整，避免震盪
+
+### 4.2 CosineAnnealingLR 實作
+
+#### 第一階段（監督式訓練）
+
+```python
+# 在定義 max_epochs 之後，訓練迴圈之前
+max_epochs = 30
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=0)
+
+# 在訓練迴圈中，每個 epoch 結束後
+for epoch in range(1, max_epochs + 1):
+    train_acc, train_loss = train(...)
+    val_acc, val_loss = val(...)
+
+    # 更新學習率
+    scheduler.step()
+```
+
+#### 第二階段（自我訓練）
+
+```python
+# 在定義 n_epochs 之後
+n_epochs = 30
+scheduler_ssl = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=5e-5)
+
+# 在訓練迴圈中
+for epoch in range(n_epochs):
+    train_acc, train_loss = train(...)
+    valid_acc, valid_loss = val(...)
+
+    # 更新學習率
+    scheduler_ssl.step()
+```
+
+### 4.3 CosineAnnealingLR 參數說明
+
+| 參數 | 說明 | 第一階段設定 | 第二階段設定 |
+|------|------|-------------|-------------|
+| **T_max** | 學習率週期長度（epochs） | `max_epochs` (30) | `n_epochs` (30) |
+| **eta_min** | 學習率的最小值 | 0 | 5e-5 (0.00005) |
+
+### 4.4 學習率變化曲線
+
+#### 餘弦退火（Cosine Annealing）原理
+
+```python
+lr(t) = eta_min + (lr_initial - eta_min) * (1 + cos(π * t / T_max)) / 2
+```
+
+**視覺化：**
+```
+第一階段 (lr: 0.001 → 0):
+LR
+0.001 ┤╮
+      │ ╲
+0.0005│  ╲___
+      │      ╲___
+0.0000└──────────╲___
+      0   15   30 epoch
+
+第二階段 (lr: 0.0005 → 0.00005):
+LR
+0.0005┤╮
+      │ ╲
+0.0003│  ╲___
+      │      ╲___
+0.0001└──────────╲___
+      0   15   30 epoch
+```
+
+### 4.5 為何選擇 CosineAnnealingLR？
+
+| Scheduler 類型 | 學習率變化 | 優點 | 缺點 |
+|---------------|-----------|------|------|
+| **StepLR** | 階梯式下降 | 簡單、可控 | 變化不夠平滑 |
+| **ExponentialLR** | 指數衰減 | 平滑下降 | 後期學習率可能過小 |
+| **CosineAnnealingLR** ✓ | 餘弦曲線 | 1. **平滑且自然的下降**<br>2. 訓練後期仍有適度學習率<br>3. 常在影像分類任務表現優秀 | 需要預先知道總 epoch 數 |
+| **ReduceLROnPlateau** | 根據驗證損失 | 自適應 | 可能過早降低學習率 |
+
+### 4.6 學習率對訓練的影響
+
+#### 不同學習率策略比較
+
+**1. 固定學習率（無 Scheduler）**
+```
+Loss ─┐    訓練初期下降快
+      │╲   ┌─┐
+      │ ╲ ╱  │  後期震盪，難以收斂
+      │  ╳   └─┐
+      └───────╲└─
+```
+
+**2. 使用 CosineAnnealingLR**
+```
+Loss ─┐    訓練初期下降快
+      │╲
+      │ ╲___   中期穩定下降
+      │     ╲___  後期平滑收斂
+      └─────────╲___
+```
+
+### 4.7 第一階段 vs 第二階段的差異
+
+| 項目 | 第一階段 | 第二階段 | 原因 |
+|------|---------|---------|------|
+| **初始學習率** | 0.001 | 0.0005 | 第二階段模型已預訓練 |
+| **最小學習率** | 0 | 0.00005 | 第二階段保持微小學習以適應偽標籤 |
+| **Scheduler 名稱** | `scheduler` | `scheduler_ssl` | 區分兩個階段的調度器 |
+| **變化幅度** | 0.001 → 0<br>(100% 下降) | 0.0005 → 0.00005<br>(90% 下降) | 第二階段更保守 |
+
+### 4.8 完整訓練週期中的學習率演變
+
+```
+第一階段 (30 epochs):
+Epoch  1: lr = 0.001000
+Epoch  5: lr = 0.000905
+Epoch 10: lr = 0.000655
+Epoch 15: lr = 0.000345
+Epoch 20: lr = 0.000095
+Epoch 25: lr = 0.000015
+Epoch 30: lr = 0.000000
+
+第二階段 (30 epochs):
+Epoch  1: lr = 0.000500
+Epoch  5: lr = 0.000452
+Epoch 10: lr = 0.000327
+Epoch 15: lr = 0.000173
+Epoch 20: lr = 0.000048
+Epoch 25: lr = 0.000008
+Epoch 30: lr = 0.000050
+```
+
+### 4.9 何時呼叫 scheduler.step()？
+
+**正確位置**：在每個 epoch 的訓練和驗證**之後**
+
+```python
+for epoch in range(max_epochs):
+    train(...)      # 訓練
+    validate(...)   # 驗證
+    scheduler.step()  # ← 在這裡更新學習率（epoch 結束後）
+```
+
+**錯誤位置示例：**
+```python
+# ✗ 錯誤：在訓練迴圈內部
+for images, labels in train_loader:
+    ...
+    optimizer.step()
+    scheduler.step()  # ✗ 會導致學習率更新過快
+
+# ✗ 錯誤：在訓練之前
+for epoch in range(max_epochs):
+    scheduler.step()  # ✗ 第一個 epoch 會用錯誤的學習率
+    train(...)
+```
+
+### 4.10 監控學習率
+
+在訓練過程中可以查看當前學習率：
+
+```python
+current_lr = optimizer.param_groups[0]['lr']
+print(f'Current learning rate: {current_lr:.6f}')
+```
+
+這在我們的程式碼中已經實作（line 512, 709）：
+```python
+lr = optimizer.param_groups[0]['lr']
+print('  Val Acc: {:.6f} |   Val Loss: {:.6f} | LR: {:.6f}'.format(val_acc, val_loss, lr))
+```
+
+---
+
+## 5. 訓練函數
+
+### 5.1 完整實作
 
 ```python
 def train(input_data, model, criterion, optimizer, epoch=None, total_epochs=None):
@@ -259,7 +768,7 @@ def train(input_data, model, criterion, optimizer, epoch=None, total_epochs=None
         loss_list.append(loss.item())
 ```
 
-### 4.2 五大步驟詳解
+### 5.2 五大步驟詳解
 
 #### 步驟 1：`optimizer.zero_grad()` - 清空梯度
 
@@ -337,7 +846,7 @@ for each parameter θ:
                                                   ↑ weight decay
 ```
 
-### 4.3 準確率統計
+### 5.3 準確率統計
 
 ```python
 _, predicted = torch.max(outputs.data, 1)
@@ -365,9 +874,9 @@ predicted == labels  # [True, False]
 
 ---
 
-## 5. 驗證函數
+## 6. 驗證函數
 
-### 5.1 與訓練函數的差異
+### 6.1 與訓練函數的差異
 
 ```python
 def val(input_data, model, criterion, epoch=None, total_epochs=None):
@@ -381,7 +890,7 @@ def val(input_data, model, criterion, epoch=None, total_epochs=None):
             # 統計準確率和損失
 ```
 
-### 5.2 關鍵差異說明
+### 6.2 關鍵差異說明
 
 | 項目 | 訓練模式 | 評估模式 |
 |------|---------|---------|
@@ -392,7 +901,7 @@ def val(input_data, model, criterion, epoch=None, total_epochs=None):
 | **反向傳播** | 有 | **無** |
 | **權重更新** | 有 | **無** |
 
-### 5.3 為何需要 `model.eval()` 和 `torch.no_grad()`？
+### 6.3 為何需要 `model.eval()` 和 `torch.no_grad()`？
 
 #### `model.eval()` 的作用：
 
@@ -436,9 +945,9 @@ x3 = conv2(x2)     # 不儲存（可覆蓋）
 
 ---
 
-## 6. 偽標籤生成
+## 7. 偽標籤生成
 
-### 6.1 什麼是偽標籤（Pseudo-Labeling）？
+### 7.1 什麼是偽標籤（Pseudo-Labeling）？
 
 **概念：**
 - 使用訓練好的模型為**未標記資料**生成預測標籤
@@ -455,7 +964,7 @@ x3 = conv2(x2)     # 不儲存（可覆蓋）
                            No:  保留在未標記池
 ```
 
-### 6.2 實作細節
+### 7.2 實作細節
 
 ```python
 def get_pseudo_labels(model, threshold=0.9):
@@ -485,7 +994,7 @@ def get_pseudo_labels(model, threshold=0.9):
                 remove_index.append(idx)
 ```
 
-### 6.3 關鍵參數：threshold = 0.9
+### 7.3 關鍵參數：threshold = 0.9
 
 #### 為何選擇 0.9？
 
@@ -511,7 +1020,7 @@ probs = [0.85, 0.08, 0.04, 0.02, 0.01]  # 預測類別 0
 → 不通過 threshold (0.9)，保留在未標記池 ✗
 ```
 
-### 6.4 Softmax 的作用
+### 7.4 Softmax 的作用
 
 ```python
 soft_max = nn.Softmax(dim=1)
@@ -543,16 +1052,16 @@ sum(probs) = 1.0 ✓
 
 ---
 
-## 7. 損失函數與優化器 - 第二階段（自我訓練）
+## 8. 損失函數與優化器 - 第二階段（自我訓練）
 
-### 7.1 為何需要調整優化器？
+### 8.1 為何需要調整優化器？
 
 在自我訓練階段，我們面臨不同的挑戰：
 1. 模型已經過第一階段訓練，具有一定能力
 2. 新加入的偽標籤可能包含雜訊
 3. 需要更謹慎地微調模型
 
-### 7.2 優化器配置
+### 8.2 優化器配置
 
 ```python
 criterion = nn.CrossEntropyLoss()  # 損失函數不變
@@ -583,7 +1092,7 @@ Loss ─┐
              └─
 ```
 
-### 7.3 為何偽標籤需要更小的學習率？
+### 8.3 為何偽標籤需要更小的學習率？
 
 #### 雜訊敏感度：
 
@@ -618,9 +1127,9 @@ Loss ─┐
 
 ---
 
-## 8. 自我訓練迴圈
+## 9. 自我訓練迴圈
 
-### 8.1 整體策略
+### 9.1 整體策略
 
 ```python
 for epoch in range(n_epochs):
@@ -637,9 +1146,9 @@ for epoch in range(n_epochs):
     valid_acc, valid_loss = val(val_loader, model, criterion)
 ```
 
-### 8.2 設計原理
+### 9.2 設計原理
 
-#### 8.2.1 為何每 10 epochs 生成偽標籤？
+#### 9.2.1 為何每 10 epochs 生成偽標籤？
 
 | 頻率 | 優點 | 缺點 | 結論 |
 |------|------|------|------|
@@ -647,7 +1156,7 @@ for epoch in range(n_epochs):
 | **每 10 epochs** ✓ | 1. 模型有足夠時間學習<br>2. 預測更穩定<br>3. 計算效率高 | 可能錯過一些改進 | ✓ **平衡選擇** |
 | **每 20+ epochs** | 偽標籤品質高 | 1. 更新太慢<br>2. 可能錯過學習機會 | ✗ 太保守 |
 
-#### 8.2.2 累積式策略 vs 替換式策略
+#### 9.2.2 累積式策略 vs 替換式策略
 
 **我們的實作（累積式）：**
 ```python
@@ -662,7 +1171,7 @@ current_train_dataset = ConcatDataset([train_set] + all_pseudo_datasets)
 | **累積式**<br>（我們使用） ✓ | 保留所有歷史偽標籤 | 1. 訓練資料持續增加<br>2. 利用早期高信心預測<br>3. 資料多樣性更高 | 1. 記憶體需求增加<br>2. 可能包含過時預測 |
 | **替換式** | 每次只用最新偽標籤 | 1. 記憶體需求固定<br>2. 使用最新模型預測 | 1. 丟棄早期正確預測<br>2. 訓練資料較少 |
 
-### 8.3 資料集演變過程
+### 9.3 資料集演變過程
 
 **視覺化時間軸：**
 ```
@@ -684,7 +1193,7 @@ Epoch 30:
 訓練集 = [原始 (1200) + 偽標籤₁ (150) + 偽標籤₂ (120) + 偽標籤₃ (100)] = 1570 張
 ```
 
-### 8.4 未標記資料池的動態變化
+### 9.4 未標記資料池的動態變化
 
 ```python
 # 從未標記池中移除已使用的資料
@@ -707,7 +1216,7 @@ Epoch 30: 選取 100 張 → 剩餘 832 張
 ...
 ```
 
-### 8.5 ConcatDataset 的作用
+### 9.5 ConcatDataset 的作用
 
 ```python
 current_train_dataset = ConcatDataset([train_set] + all_pseudo_datasets)
@@ -745,7 +1254,9 @@ current_train_dataset[1350] → pseudo_dataset₂[0]
 │    ↓                                                     │
 │ 3. 使用 CrossEntropyLoss + AdamW (lr=0.001)            │
 │    ↓                                                     │
-│ 4. 訓練 30 epochs → 儲存最佳模型                        │
+│ 4. 學習率調度器 CosineAnnealingLR (0.001 → 0)          │
+│    ↓                                                     │
+│ 5. 訓練 30 epochs → 儲存最佳模型                        │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
@@ -759,6 +1270,7 @@ current_train_dataset[1350] → pseudo_dataset₂[0]
 │ 使用：                                                  │
 │   - CrossEntropyLoss                                    │
 │   - AdamW (lr=0.0005, 降低學習率)                      │
+│   - 學習率調度器 CosineAnnealingLR (0.0005 → 0.00005) │
 │   - 累積式資料策略                                      │
 └─────────────────────────────────────────────────────────┘
                            ↓
@@ -774,6 +1286,7 @@ current_train_dataset[1350] → pseudo_dataset₂[0]
 | **損失函數** | CrossEntropyLoss | 多分類標準選擇，數值穩定 |
 | **優化器** | AdamW | 比 Adam 有更好的泛化能力 |
 | **學習率** | 0.001 → 0.0005 | 第二階段降低，適應偽標籤雜訊 |
+| **學習率調度器** | CosineAnnealingLR | 平滑降低學習率，幫助模型收斂 |
 | **偽標籤閾值** | 0.9 | 平衡準確率與資料量 |
 | **更新頻率** | 每 10 epochs | 給模型足夠時間穩定 |
 | **資料策略** | 累積式 | 最大化訓練資料利用 |
